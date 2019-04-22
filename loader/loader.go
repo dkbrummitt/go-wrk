@@ -6,13 +6,14 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/tsliwowicz/go-wrk/util"
+	"github.com/dkbrummitt/go-wrk/util"
 )
 
 const (
@@ -37,6 +38,7 @@ type LoadCfg struct {
 	clientKey          string
 	caCert             string
 	http2              bool
+	variantBody        []string
 }
 
 // RequesterStats used for colelcting aggregate statistics
@@ -64,9 +66,10 @@ func NewLoadCfg(duration int, //seconds
 	clientCert string,
 	clientKey string,
 	caCert string,
-	http2 bool) (rt *LoadCfg) {
+	http2 bool,
+	variantBody []string) (rt *LoadCfg) {
 	rt = &LoadCfg{duration, goroutines, testUrl, reqBody, method, host, header, statsAggregator, timeoutms,
-		allowRedirects, disableCompression, disableKeepAlive, 0, clientCert, clientKey, caCert, http2}
+		allowRedirects, disableCompression, disableKeepAlive, 0, clientCert, clientKey, caCert, http2, variantBody}
 	return
 }
 
@@ -101,13 +104,27 @@ func escapeUrlStr(in string) string {
 
 //DoRequest single request implementation. Returns the size of the response and its duration
 //On error - returns -1 on both
-func DoRequest(httpClient *http.Client, header map[string]string, method, host, loadUrl, reqBody string) (respSize int, duration time.Duration) {
+func DoRequest(httpClient *http.Client, header map[string]string, method, host, loadUrl, reqBody string, variantBody []string) (respSize int, duration time.Duration) {
 	respSize = -1
 	duration = -1
 
 	loadUrl = escapeUrlStr(loadUrl)
 
 	var buf io.Reader
+	if len(variantBody) > 0 {
+		rand.Seed(time.Now().Unix())
+		reqBody = variantBody[rand.Intn(len(variantBody))]
+		//fmt.Printf("--------- Sending %s", reqBody)
+	}
+	if strings.Index(reqBody, "{{}}") >= 0 {
+		randS := randStringRunes(8)
+		newBody := strings.ReplaceAll(reqBody, "{{}}", randS)
+		t := time.Now()
+
+		fmt.Println(t.Format(time.RFC850), "Sending request for", randS)
+		reqBody = newBody
+	}
+
 	if len(reqBody) > 0 {
 		buf = bytes.NewBufferString(reqBody)
 	}
@@ -164,6 +181,14 @@ func DoRequest(httpClient *http.Client, header map[string]string, method, host, 
 
 	return
 }
+func randStringRunes(n int) string {
+	var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+	}
+	return string(b)
+}
 
 //Requester a go function for repeatedly making requests and aggregating statistics as long as required
 //When it is done, it sends the results using the statsAggregator channel
@@ -175,18 +200,23 @@ func (cfg *LoadCfg) RunSingleLoadSession() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
+	max := 10
 	for time.Since(start).Seconds() <= float64(cfg.duration) && atomic.LoadInt32(&cfg.interrupted) == 0 {
-		respSize, reqDur := DoRequest(httpClient, cfg.header, cfg.method, cfg.host, cfg.testUrl, cfg.reqBody)
-		if respSize > 0 {
-			stats.TotRespSize += int64(respSize)
-			stats.TotDuration += reqDur
-			stats.MaxRequestTime = util.MaxDuration(reqDur, stats.MaxRequestTime)
-			stats.MinRequestTime = util.MinDuration(reqDur, stats.MinRequestTime)
-			stats.NumRequests++
+		if stats.NumRequests >= max {
+			//do nothing
 		} else {
-			stats.NumErrs++
-		}
+			respSize, reqDur := DoRequest(httpClient, cfg.header, cfg.method, cfg.host, cfg.testUrl, cfg.reqBody, cfg.variantBody)
+
+			if respSize > 0 {
+				stats.TotRespSize += int64(respSize)
+				stats.TotDuration += reqDur
+				stats.MaxRequestTime = util.MaxDuration(reqDur, stats.MaxRequestTime)
+				stats.MinRequestTime = util.MinDuration(reqDur, stats.MinRequestTime)
+				stats.NumRequests++
+			} else {
+				stats.NumErrs++
+			}
+		} //hit the upper limit. Stop
 	}
 	cfg.statsAggregator <- stats
 }

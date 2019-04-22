@@ -4,14 +4,15 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"os"
 	"os/signal"
 	"runtime"
 	"strings"
 	"time"
 
-	"github.com/tsliwowicz/go-wrk/loader"
-	"github.com/tsliwowicz/go-wrk/util"
+	"github.com/dkbrummitt/go-wrk/loader"
+	"github.com/dkbrummitt/go-wrk/util"
 )
 
 const APP_VERSION = "0.1"
@@ -35,6 +36,7 @@ var playbackFile string
 var reqBody string
 var clientCert string
 var clientKey string
+var tempVals string
 var caCert string
 var http2 bool
 
@@ -55,6 +57,7 @@ func init() {
 	flag.StringVar(&clientCert, "cert", "", "CA certificate file to verify peer against (SSL/TLS)")
 	flag.StringVar(&clientKey, "key", "", "Private key file name (SSL/TLS")
 	flag.StringVar(&caCert, "ca", "", "CA file to verify peer against (SSL/TLS)")
+	flag.StringVar(&tempVals, "tv", "", "The values that should replace {{}} in the body. Ignored if no body provided.(Comma delimted)")
 	flag.BoolVar(&http2, "http", true, "Use HTTP/2")
 }
 
@@ -65,6 +68,15 @@ func printDefaults() {
 	flag.VisitAll(func(flag *flag.Flag) {
 		fmt.Println("\t-"+flag.Name, "\t", flag.Usage, "(Default "+flag.DefValue+")")
 	})
+}
+
+func RandStringRunes(n int) string {
+	var letterRunes = []rune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+	}
+	return string(b)
 }
 
 func main() {
@@ -112,7 +124,7 @@ func main() {
 	}
 
 	fmt.Printf("Running %vs test @ %v\n  %v goroutine(s) running concurrently\n", duration, testUrl, goroutines)
-
+	var variantBody []string
 	if len(reqBody) > 0 && reqBody[0] == '@' {
 		bodyFilename := reqBody[1:]
 		data, err := ioutil.ReadFile(bodyFilename)
@@ -120,11 +132,33 @@ func main() {
 			fmt.Println(fmt.Errorf("could not read file %q: %v", bodyFilename, err))
 			os.Exit(1)
 		}
+
 		reqBody = string(data)
 	}
+	fmt.Println("template vals is", tempVals)
+	if tempVals != "" {
+		//split tv comma delimit
+		tvs := strings.Split(string(tempVals), ",")
+		// rand.Seed(time.Now().Unix())
+		//message := fmt.Sprint("Gonna work from home...", tvs[rand.Intn(len(tvs))])
+		// replacement := tvs[rand.Intn(len(tvs))]
 
+		//take care of new lines/carriage returns
+		// replacement = strings.TrimSuffix(replacement, "\n")
+		// replacement = strings.TrimSuffix(replacement, "\r")
+		// data = []byte(replacement)
+		for _, variant := range tvs {
+			variant = strings.TrimSuffix(variant, "\n")
+			variant = strings.TrimSuffix(variant, "\r")
+			newBody := strings.ReplaceAll(reqBody, "{{}}", variant)
+			variantBody = append(variantBody, newBody)
+			//fmt.Printf("Created Body for %s", variant)
+			//fmt.Printf("New Body is %s", newBody)
+			// panic("check myself ...")
+		}
+	}
 	loadGen := loader.NewLoadCfg(duration, goroutines, testUrl, reqBody, method, host, header, statsAggregator, timeoutms,
-		allowRedirectsFlag, disableCompression, disableKeepAlive, clientCert, clientKey, caCert, http2)
+		allowRedirectsFlag, disableCompression, disableKeepAlive, clientCert, clientKey, caCert, http2, variantBody)
 
 	for i := 0; i < goroutines; i++ {
 		go loadGen.RunSingleLoadSession()
